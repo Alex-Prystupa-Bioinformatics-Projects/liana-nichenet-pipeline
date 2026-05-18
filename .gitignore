@@ -1,10 +1,5 @@
-# renv — keep the lockfile, ignore the library itself
-renv/library/
-renv/local/
-renv/cellar/
-renv/staging/
-renv/.cache/
-renv/python/
+# renv — keep the lockfile only, ignore everything else
+renv/
 
 # R session artifacts
 .Rhistory
