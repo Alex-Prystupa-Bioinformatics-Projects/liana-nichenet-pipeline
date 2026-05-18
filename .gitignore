@@ -28,5 +28,10 @@ lrp-outs*/
 *.err
 omnipathr-log/
 
+# Internal analysis notes and rendered reports
+notes/
+analysis-overview.html
+scripts/diagnose-nichenet.Rmd
+
 # OS
 .DS_Store
