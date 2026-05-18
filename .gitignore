@@ -1,5 +1,10 @@
-# renv — keep the lockfile only, ignore everything else
-renv/
+# renv — ignore the installed library, but keep activate.R, settings.json, .gitignore
+renv/library/
+renv/local/
+renv/cellar/
+renv/staging/
+renv/.cache/
+renv/python/
 
 # R session artifacts
 .Rhistory
