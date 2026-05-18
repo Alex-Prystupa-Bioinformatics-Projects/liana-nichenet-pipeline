@@ -1,0 +1,11 @@
+# pipeline-config.yml
+# Internal pipeline parameters — these should not need to be changed for normal use.
+
+nichenet:
+  paths:
+    human:
+      lr_network: /sc/arion/projects/naiklab/shared/nichenet-inputs/human/lr_network_human.rds
+      ligand_target_matrix: /sc/arion/projects/naiklab/shared/nichenet-inputs/human/ligand_target_matrix_human.rds
+    mouse:
+      lr_network: /sc/arion/projects/naiklab/shared/nichenet-inputs/mouse/lr_network_mouse.rds
+      ligand_target_matrix: /sc/arion/projects/naiklab/shared/nichenet-inputs/mouse/ligand_target_matrix_mouse.rds

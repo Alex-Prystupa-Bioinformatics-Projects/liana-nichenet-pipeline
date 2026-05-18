@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# Run once on the login node to install all R packages and save the platform
+# prefix. Compute nodes may run a different OS minor version, so we record the
+# login node's renv platform and point jobs at it explicitly via .renv_platform.
+
+set -e
+
+cd /sc/arion/projects/naiklab/Alex/Fistula-Project/Simmons_Cho_Integration/Interactome/lrp
+
+module load R/4.4.1
+module load glpk/4.55
+
+echo "Restoring renv library (this may take a while)..."
+Rscript -e "renv::restore()"
+
+echo "Saving platform prefix..."
+Rscript --no-init-file -e "cat(renv:::renv_platform_prefix())" > .renv_platform
+
+echo "Done. Platform: $(cat .renv_platform)"
+echo "You can now submit jobs with: bash lrp/run"

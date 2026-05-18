@@ -1,0 +1,40 @@
+# config.yml
+
+paths:
+  RDS_File: /sc/arion/projects/naiklab/Alex/Fistula-Project/Simmons_Cho_Integration/output/RDS/seu_obj_final_annotations_cho_simmons-March-26th.RDS
+  DefaultAssay: RNA
+  CellTypeCol: Final_Annotations
+
+nichenet:
+  mode: standard   # "standard" (per-niche, recommended) or "differential" (cross-niche comparison)
+  organism: human  # switch to "mouse" for mouse datasets
+
+  # Do not change any of these unless you have a specific reason to
+  # lfc_cutoff: 0.15 for 10x with 3+ niches; 0.25 for only 2 niches; higher for Smart-seq2
+  # expression_pct: fraction of cells that must express a gene for it to be included
+  lfc_cutoff: 1.5
+  expression_pct: 0.25
+  top_n_ligands: 40        # number of top-ranked ligands shown per niche in the circos plot
+  top_n_receptors_per_ligand: 3  # number of top receptors shown per ligand in the circos plot
+  top_n_targets: 250       # number of top predicted target genes per ligand used in activity scoring
+
+  # Define your niches below. Each niche has one receiver (must be unique across niches)
+  # and one or more senders. Use exact cell type names from the Final_Annotations column.
+  niches:
+    Squamous_niche:
+      sender:
+        - Tc1
+        - Tc1-GZMA
+        - Th17-MAIT
+      receiver: Squamous_Epithelia
+    Columnar_niche:
+      sender:
+        - Tc1
+        - Tc1-GZMA
+        - Th17-MAIT
+      receiver: Columnar_Epithelia
+
+combined:
+  top_n_liana_interactions: 250    # top LIANA pairs per sender→receiver (by aggregate_rank)
+  aggregate_rank_threshold: 0.10  # hard ceiling — only pairs with aggregate_rank < this are kept
+  top_n_nn_ligands: 25            # top NicheNet ligands shown in barplot (by pearson correlation)

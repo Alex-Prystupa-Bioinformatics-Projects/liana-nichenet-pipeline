@@ -1,0 +1,355 @@
+---
+title: "NicheNet Circos Diagnostic"
+output: html_document
+---
+
+# Setup
+
+Config values are pulled directly from `config.yml` and `pipeline-config.yml`.
+Run chunks sequentially to diagnose issues.
+
+```{r setup}
+library(yaml)
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(nichenetr)
+library(presto)
+library(RColorBrewer)
+library(glue)
+library(circlize)
+
+configs         <- yaml::read_yaml("../config.yml")
+pipeline_configs <- yaml::read_yaml("../pipeline-config.yml")
+
+source("helper-functions/helper-functions.R")
+```
+
+# Config values in use
+
+```{r config-values}
+# --- Paths ---
+rds_path      <- configs$paths$RDS_File
+default_assay <- configs$paths$DefaultAssay
+cell_type_col <- configs$paths$CellTypeCol
+
+# --- NicheNet params ---
+nn_cfg       <- configs$nichenet
+org          <- nn_cfg$organism
+lfc_cutoff   <- nn_cfg$lfc_cutoff
+expr_pct     <- nn_cfg$expression_pct
+top_n_lig    <- nn_cfg$top_n_ligands
+top_n_rec    <- nn_cfg$top_n_receptors_per_ligand
+top_n_tgt    <- nn_cfg$top_n_targets
+
+# --- Niches ---
+niches <- lapply(nn_cfg$niches, function(n) list(sender = n$sender, receiver = n$receiver))
+
+# --- Database paths ---
+lr_network_path         <- pipeline_configs$nichenet$paths[[org]]$lr_network
+ligand_target_matrix_path <- pipeline_configs$nichenet$paths[[org]]$ligand_target_matrix
+
+cat("RDS:            ", rds_path, "\n")
+cat("Assay:          ", default_assay, "\n")
+cat("Cell type col:  ", cell_type_col, "\n")
+cat("Organism:       ", org, "\n")
+cat("lfc_cutoff:     ", lfc_cutoff, "\n")
+cat("expression_pct: ", expr_pct, "\n")
+cat("top_n_ligands:  ", top_n_lig, "\n")
+cat("top_n_receptors:", top_n_rec, "\n")
+cat("top_n_targets:  ", top_n_tgt, "\n")
+cat("\nNiches:\n")
+for (nm in names(niches)) {
+  cat(" ", nm, "— sender:", paste(niches[[nm]]$sender, collapse=", "),
+      "| receiver:", niches[[nm]]$receiver, "\n")
+}
+```
+
+# 1. Load Seurat object
+
+```{r load-data}
+stopifnot("RDS file not found" = file.exists(rds_path))
+seu_obj <- readRDS(rds_path)
+DefaultAssay(seu_obj) <- default_assay
+seu_obj <- JoinLayers(seu_obj, assay = default_assay)
+Idents(seu_obj) <- seu_obj@meta.data[[cell_type_col]]
+
+cat("Cell types present:\n")
+print(sort(unique(Idents(seu_obj))))
+```
+
+```{r check-niche-cell-types}
+# Verify all sender/receiver names exist in the Seurat object
+all_celltypes <- as.character(unique(Idents(seu_obj)))
+for (nm in names(niches)) {
+  missing_senders   <- setdiff(niches[[nm]]$sender,   all_celltypes)
+  missing_receivers <- setdiff(niches[[nm]]$receiver, all_celltypes)
+  if (length(missing_senders) > 0)
+    warning(glue("Niche '{nm}': senders not found in data: {paste(missing_senders, collapse=', ')}"))
+  if (length(missing_receivers) > 0)
+    warning(glue("Niche '{nm}': receiver not found in data: {paste(missing_receivers, collapse=', ')}"))
+}
+cat("Cell type check complete.\n")
+```
+
+# 2. Load NicheNet databases
+
+```{r load-databases}
+stopifnot("lr_network file not found"           = file.exists(lr_network_path))
+stopifnot("ligand_target_matrix file not found" = file.exists(ligand_target_matrix_path))
+
+lr_network           <- readRDS(lr_network_path)
+ligand_target_matrix <- readRDS(ligand_target_matrix_path)
+
+lr_network <- lr_network %>%
+  dplyr::rename(ligand = from, receptor = to) %>%
+  distinct(ligand, receptor)
+
+cat("lr_network rows:           ", nrow(lr_network), "\n")
+cat("ligand_target_matrix dims: ", dim(ligand_target_matrix), "\n")
+```
+
+# 3. Differential expression
+
+```{r de-senders-receivers}
+DE_sender <- calculate_niche_de(
+  seurat_obj = seu_obj, niches = niches, type = "sender", assay_oi = default_assay)
+DE_sender_processed <- process_niche_de(
+  DE_table = DE_sender, niches = niches, expression_pct = expr_pct, type = "sender")
+
+DE_receiver <- calculate_niche_de(
+  seurat_obj = seu_obj, niches = niches, type = "receiver", assay_oi = default_assay)
+DE_receiver_processed <- process_niche_de(
+  DE_table = DE_receiver, niches = niches, expression_pct = expr_pct, type = "receiver")
+
+DE_sender_receiver <- combine_sender_receiver_de(
+  DE_sender_processed, DE_receiver_processed, lr_network, specificity_score = "min_lfc")
+
+cat("DE_sender rows:          ", nrow(DE_sender), "\n")
+cat("DE_receiver rows:        ", nrow(DE_receiver), "\n")
+cat("DE_sender_receiver rows: ", nrow(DE_sender_receiver), "\n")
+```
+
+# 4. Receiver target DE + geneset sizes
+
+```{r geneset-sizes}
+DE_receiver_targets <- calculate_niche_de_targets(
+  seurat_obj    = seu_obj,
+  niches        = niches,
+  expression_pct = expr_pct,
+  lfc_cutoff    = lfc_cutoff,
+  assay_oi      = default_assay
+)
+DE_receiver_processed_targets <- process_receiver_target_de(
+  DE_receiver_targets = DE_receiver_targets,
+  niches              = niches,
+  expression_pct      = expr_pct,
+  specificity_score   = "min_lfc"
+)
+
+# Check geneset sizes — vignette recommends 20–1000 genes; adjust lfc_cutoff if outside range
+for (niche_oi in names(niches)) {
+  receiver_oi <- niches[[niche_oi]]$receiver
+  geneset <- DE_receiver_processed_targets %>%
+    filter(receiver == receiver_oi & niche == niche_oi & target_score > lfc_cutoff) %>%
+    pull(target) %>% unique()
+  cat(glue("Niche '{niche_oi}' geneset size: {length(geneset)}"), "\n")
+  if (length(geneset) < 20)
+    warning(glue("Geneset for '{niche_oi}' has < 20 genes — consider lowering lfc_cutoff in config.yml"))
+  if (length(geneset) > 1000)
+    warning(glue("Geneset for '{niche_oi}' has > 1000 genes — consider raising lfc_cutoff in config.yml"))
+}
+```
+
+# 5. Ligand activity
+
+```{r ligand-activity}
+niche_geneset_list <- lapply(names(niches), function(niche_oi) {
+  receiver_oi <- niches[[niche_oi]]$receiver
+  geneset <- DE_receiver_processed_targets %>%
+    filter(receiver == receiver_oi & niche == niche_oi & target_score > lfc_cutoff) %>%
+    pull(target) %>% unique()
+  background <- rownames(seu_obj)[
+    Matrix::rowSums(GetAssayData(seu_obj, assay = default_assay)) > 0]
+  list(receiver = receiver_oi, geneset = geneset, background = background)
+})
+names(niche_geneset_list) <- names(niches)
+
+ligand_activities_targets <- get_ligand_activities_targets(
+  niche_geneset_list   = niche_geneset_list,
+  ligand_target_matrix = ligand_target_matrix,
+  top_n_target         = top_n_tgt
+)
+
+cat("ligand_activities_targets rows:", nrow(ligand_activities_targets), "\n")
+```
+
+# 6. Expression tables + prioritization
+
+```{r expression-and-prioritization}
+prioritizing_weights <- c(
+  scaled_ligand_score                        = 5,
+  scaled_ligand_expression_scaled            = 1,
+  ligand_fraction                            = 1,
+  scaled_ligand_score_spatial                = 0,
+  scaled_receptor_score                      = 0.5,
+  scaled_receptor_expression_scaled          = 0.5,
+  receptor_fraction                          = 1,
+  ligand_scaled_receptor_expression_fraction = 1,
+  scaled_receptor_score_spatial              = 0,
+  scaled_activity                            = 0,
+  scaled_activity_normalized                 = 1
+)
+
+features_oi <- union(lr_network$ligand, lr_network$receptor) %>%
+  union(ligand_activities_targets$target) %>% setdiff(NA)
+
+dotplot <- suppressWarnings(Seurat::DotPlot(
+  seu_obj %>% subset(idents = niches %>% unlist() %>% unique()),
+  features = features_oi, assay = default_assay
+))
+exprs_tbl <- dotplot$data %>% as_tibble() %>%
+  rename(celltype = id, gene = features.plot, expression = avg.exp,
+         expression_scaled = avg.exp.scaled, fraction = pct.exp) %>%
+  mutate(fraction = fraction / 100) %>%
+  select(celltype, gene, expression, expression_scaled, fraction) %>%
+  distinct() %>% arrange(gene) %>% mutate(gene = as.character(gene))
+
+exprs_tbl_ligand <- exprs_tbl %>%
+  filter(gene %in% lr_network$ligand) %>%
+  rename(sender = celltype, ligand = gene, ligand_expression = expression,
+         ligand_expression_scaled = expression_scaled, ligand_fraction = fraction) %>%
+  mutate(scaled_ligand_expression_scaled = scale_quantile_adapted(ligand_expression_scaled)) %>%
+  mutate(ligand_fraction_adapted = ligand_fraction) %>%
+  mutate_cond(ligand_fraction >= expr_pct, ligand_fraction_adapted = expr_pct) %>%
+  mutate(scaled_ligand_fraction_adapted = scale_quantile_adapted(ligand_fraction_adapted))
+
+exprs_tbl_receptor <- exprs_tbl %>%
+  filter(gene %in% lr_network$receptor) %>%
+  rename(receiver = celltype, receptor = gene, receptor_expression = expression,
+         receptor_expression_scaled = expression_scaled, receptor_fraction = fraction) %>%
+  mutate(scaled_receptor_expression_scaled = scale_quantile_adapted(receptor_expression_scaled)) %>%
+  mutate(receptor_fraction_adapted = receptor_fraction) %>%
+  mutate_cond(receptor_fraction >= expr_pct, receptor_fraction_adapted = expr_pct) %>%
+  mutate(scaled_receptor_fraction_adapted = scale_quantile_adapted(receptor_fraction_adapted))
+
+exprs_tbl_target <- exprs_tbl %>%
+  filter(gene %in% ligand_activities_targets$target) %>%
+  rename(receiver = celltype, target = gene, target_expression = expression,
+         target_expression_scaled = expression_scaled, target_fraction = fraction)
+
+exprs_sender_receiver <- lr_network %>%
+  inner_join(exprs_tbl_ligand, by = c("ligand")) %>%
+  inner_join(exprs_tbl_receptor, by = c("receptor")) %>%
+  inner_join(DE_sender_receiver %>% distinct(niche, sender, receiver))
+
+ligand_scaled_receptor_expression_fraction_df <- exprs_sender_receiver %>%
+  group_by(ligand, receiver) %>%
+  mutate(rank_receptor_expression = dense_rank(receptor_expression),
+         rank_receptor_fraction   = dense_rank(receptor_fraction)) %>%
+  mutate(ligand_scaled_receptor_expression_fraction = 0.5 * (
+    (rank_receptor_fraction  / max(rank_receptor_fraction)) +
+    (rank_receptor_expression / max(rank_receptor_expression))
+  )) %>%
+  distinct(ligand, receptor, receiver, ligand_scaled_receptor_expression_fraction) %>%
+  ungroup()
+
+spatial_info <- tibble(celltype_region_oi = NA, celltype_other_region = NA,
+                       niche = NA, celltype_type = NA)
+sender_spatial_DE_processed <- get_non_spatial_de(
+  niches = niches, spatial_info = spatial_info, type = "sender", lr_network = lr_network) %>%
+  mutate(scaled_ligand_score_spatial = scale_quantile_adapted(ligand_score_spatial))
+
+receiver_spatial_DE_processed <- get_non_spatial_de(
+  niches = niches, spatial_info = spatial_info, type = "receiver", lr_network = lr_network) %>%
+  mutate(scaled_receptor_score_spatial = scale_quantile_adapted(receptor_score_spatial))
+
+output <- list(
+  DE_sender_receiver                          = DE_sender_receiver,
+  ligand_scaled_receptor_expression_fraction_df = ligand_scaled_receptor_expression_fraction_df,
+  sender_spatial_DE_processed                 = sender_spatial_DE_processed,
+  receiver_spatial_DE_processed               = receiver_spatial_DE_processed,
+  ligand_activities_targets                   = ligand_activities_targets,
+  DE_receiver_processed_targets               = DE_receiver_processed_targets,
+  exprs_tbl_ligand                            = exprs_tbl_ligand,
+  exprs_tbl_receptor                          = exprs_tbl_receptor,
+  exprs_tbl_target                            = exprs_tbl_target
+)
+
+prioritization_tables <- get_prioritization_tables(output, prioritizing_weights)
+cat("prioritization_tbl_ligand_receptor rows:", nrow(prioritization_tables$prioritization_tbl_ligand_receptor), "\n")
+cat("prioritization_tbl_ligand_target rows:  ", nrow(prioritization_tables$prioritization_tbl_ligand_target), "\n")
+```
+
+# 7. Circos plot diagnostic
+
+This section isolates exactly what the pipeline does so you can see whether the
+PDF is written correctly. The fix is that `pdf()` must be opened **before**
+calling `make_circos_lr` — circlize draws to the active device as a side effect.
+
+```{r circos-test}
+top_ligand_receptor_niche_df <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  select(niche, sender, receiver, ligand, receptor, prioritization_score) %>%
+  group_by(ligand, receptor) %>% top_n(1, prioritization_score) %>%
+  ungroup() %>% select(ligand, receptor, niche) %>%
+  rename(top_niche = niche)
+
+for (niche_oi in names(niches)) {
+  receiver_oi <- niches[[niche_oi]]$receiver
+
+  filtered_ligands <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+    filter(receiver == receiver_oi) %>%
+    top_n(top_n_lig, prioritization_score) %>%
+    pull(ligand) %>% unique()
+
+  cat(glue("\nNiche '{niche_oi}': {length(filtered_ligands)} top ligands"), "\n")
+
+  prioritized_tbl_oi <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+    filter(ligand %in% filtered_ligands) %>%
+    select(niche, sender, receiver, ligand, receptor, ligand_receptor, prioritization_score) %>%
+    distinct() %>%
+    inner_join(top_ligand_receptor_niche_df) %>%
+    group_by(ligand) %>%
+    filter(receiver == receiver_oi) %>%
+    top_n(top_n_rec, prioritization_score) %>%
+    ungroup()
+
+  cat(glue("  prioritized_tbl_oi rows: {nrow(prioritized_tbl_oi)}"), "\n")
+
+  if (nrow(prioritized_tbl_oi) == 0) {
+    warning(glue("No LR pairs to plot for niche '{niche_oi}' — skipping circos"))
+    next
+  }
+
+  n_senders <- length(unique(prioritized_tbl_oi$sender))
+  cat(glue("  unique senders: {n_senders}"), "\n")
+
+  # brewer.pal requires n >= 3; if fewer senders, pad with extra colors
+  pal_n <- max(3, n_senders)
+  colors_sender <- brewer.pal(n = pal_n, name = "Spectral")[seq_len(n_senders)] %>%
+    magrittr::set_names(prioritized_tbl_oi$sender %>% unique() %>% sort())
+
+  colors_receiver <- c("lavender") %>%
+    magrittr::set_names(prioritized_tbl_oi$receiver %>% unique() %>% sort())
+
+  out_path <- glue("../lrp-outs/niche-net/plots/{niche_oi}-circos-diag.pdf")
+  dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
+
+  # pdf() MUST be opened before make_circos_lr — circlize draws to the active device
+  pdf(out_path, width = 10, height = 10)
+  tryCatch({
+    make_circos_lr(prioritized_tbl_oi, colors_sender, colors_receiver)
+    cat(glue("  PDF written: {out_path}"), "\n")
+  }, error = function(e) {
+    cat(glue("  ERROR in make_circos_lr: {e$message}"), "\n")
+  })
+  dev.off()
+}
+```
+
+# Session info
+
+```{r session-info}
+sessionInfo()
+```

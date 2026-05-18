@@ -1,0 +1,32 @@
+# renv — keep the lockfile, ignore the library itself
+renv/library/
+renv/local/
+renv/cellar/
+renv/staging/
+renv/.cache/
+renv/python/
+
+# R session artifacts
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Large data files
+*.RDS
+*.rds
+*.h5
+*.h5ad
+*.h5seurat
+
+# Pipeline outputs (generated, not tracked)
+lrp-outs*/
+
+# Logs
+*.log
+*.out
+*.err
+omnipathr-log/
+
+# OS
+.DS_Store
