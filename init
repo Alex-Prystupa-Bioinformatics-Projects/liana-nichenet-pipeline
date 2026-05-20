@@ -33,8 +33,5 @@ Rscript -e "renv::restore()" > "$log" 2>&1 || {
 echo "Saving platform prefix..."
 Rscript --no-init-file -e "cat(renv:::renv_platform_prefix())" > .renv_platform
 
-# Success — clear the log
-> "$log"
-
 echo "Done. Platform: $(cat .renv_platform)"
 echo "You can now submit jobs with: bash lrp/run"
