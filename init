@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -l
 
 # Run once on the login node to install all R packages and save the platform
 # prefix. Compute nodes may run a different OS minor version, so we record the
@@ -8,14 +8,33 @@ set -e
 
 cd "$(dirname "$0")"
 
+# Source the module system if not already available (needed when running as a script)
+if ! command -v module &>/dev/null; then
+    source /etc/profile.d/modules.sh
+fi
+
 module load R/4.4.1
 module load glpk/4.55
 
+# Explicitly export LD_LIBRARY_PATH so renv's test-load subprocesses (R --vanilla)
+# inherit the glpk shared library path regardless of how this script was invoked.
+export LD_LIBRARY_PATH
+
+mkdir -p logs
+log="logs/init.log"
+rm -f "$log"
+
 echo "Restoring renv library (this may take a while)..."
-Rscript -e "renv::restore()"
+Rscript -e "renv::restore()" > "$log" 2>&1 || {
+    echo "ERROR: renv::restore() failed. See $log for details." >&2
+    exit 1
+}
 
 echo "Saving platform prefix..."
 Rscript --no-init-file -e "cat(renv:::renv_platform_prefix())" > .renv_platform
+
+# Success — clear the log
+> "$log"
 
 echo "Done. Platform: $(cat .renv_platform)"
 echo "You can now submit jobs with: bash lrp/run"
